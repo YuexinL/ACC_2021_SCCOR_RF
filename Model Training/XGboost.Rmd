@@ -1,0 +1,432 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r}
+# getwd()
+# save.image(file = "XGboost.RData")
+```
+
+```{r}
+# rm(list = ls())
+# load("XGboost.RData")
+```
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = TRUE)
+```
+
+```{r}
+library(pacman)
+p_load(readxl, tidyverse, RSBID, 
+       caret, pROC, plotROC)
+select <- dplyr::select
+```
+
+```{r, warning = T}
+setwd(dirname(dirname(rstudioapi::getActiveDocumentContext()$path)))
+# getwd()
+load("Processed Data/data_sym.RData")
+load("Processed Data/data_asym.RData")
+```
+
+# Data Preparation
+
+```{r}
+# relabel response classes
+d1 <- data_sym %>% 
+  select(-Patient_ID) %>% 
+  mutate(LVEF_m06 = factor(LVEF_m06, levels = c(">50", "<50"), labels = c("normal", "low")))
+
+# record the original order of features
+predictors <- colnames(d1)
+```
+
+```{r}
+# transform categorical variables into dummy variables (for LASSO)
+d2 <- d1 %>% 
+  mutate(Gender = ifelse(Gender == "F", 0, 1), 
+         Hypertension = ifelse(Hypertension == "no", 0, 1), 
+         AF = ifelse(AF == "no", 0, 1))
+```
+
+## XGboost
+
+### Baseline
+
+#### xgbTree
+
+```{r}
+start.time <- Sys.time()
+
+# data input
+input <- d1
+
+# repeated LGOCV cross validation
+pct <- 0.85
+rep <- 100
+
+control <- trainControl(
+  method = "LGOCV",
+  p = pct, 
+  number = rep,
+  savePredictions = "all", 
+  classProbs = TRUE, 
+  summaryFunction = twoClassSummary)
+
+grid <- expand.grid(
+  .C = 10^(-2:2))
+
+# Fit the model
+set.seed(123)
+fit <- train(
+  LVEF_m06 ~ ., 
+  data = input, 
+  method = "xgbTree", 
+  metric = "ROC",
+  #tuneGrid = grid, 
+  trControl = control, 
+  verbosity = 0)
+
+end.time <- Sys.time()
+print(end.time - start.time)
+
+assign(paste0("xgb1", "_baseline"), 
+       fit)
+```
+
+```{r}
+fit <- get(paste0("xgb1", "_baseline"))
+
+fit$resampledCM %>%
+  group_by(max_depth, eta, min_child_weight, subsample, colsample_bytree, gamma, nrounds) %>% 
+  summarise(Accuracy = mean((cell1+cell4) / (cell1+cell2+cell3+cell4)),
+            Precision = mean(cell1 / (cell1+cell3)),
+            Recall = mean(cell1 / (cell1+cell2)),
+            Specificity = mean(cell4 / (cell3+cell4)), 
+            .groups = "drop") %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  mutate(F1 = 2 / (1/Recall+1/Precision)) %>% 
+  left_join(fit$results[, 1:8], by = c("eta", "max_depth", "gamma", "colsample_bytree", "min_child_weight", "subsample", "nrounds")) %>% 
+  arrange(desc(ROC)) -> tune
+
+tune
+
+assign(paste0("tune", ".xgb1_baseline"), 
+       tune)
+```
+
+#### xgbLinear
+
+```{r}
+start.time <- Sys.time()
+
+# data input
+input <- d1
+
+# repeated LGOCV cross validation
+pct <- 0.85
+rep <- 100
+
+control <- trainControl(
+  method = "LGOCV",
+  p = pct, 
+  number = rep,
+  savePredictions = "all", 
+  classProbs = TRUE, 
+  summaryFunction = twoClassSummary)
+
+grid <- expand.grid(
+  .C = 10^(-2:2))
+
+# Fit the model
+set.seed(123)
+fit <- train(
+  LVEF_m06 ~ ., 
+  data = input, 
+  method = "xgbLinear", 
+  metric = "ROC",
+  #tuneGrid = grid, 
+  trControl = control)
+
+end.time <- Sys.time()
+print(end.time - start.time)
+
+assign(paste0("xgb2", "_baseline"), 
+       fit)
+```
+
+```{r}
+fit <- get(paste0("xgb2", "_baseline"))
+
+fit$resampledCM %>%
+  group_by(alpha, eta, lambda, nrounds) %>% 
+  summarise(Accuracy = mean((cell1+cell4) / (cell1+cell2+cell3+cell4)),
+            Precision = mean(cell1 / (cell1+cell3)),
+            Recall = mean(cell1 / (cell1+cell2)),
+            Specificity = mean(cell4 / (cell3+cell4)), 
+            .groups = "drop") %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  mutate(F1 = 2 / (1/Recall+1/Precision)) %>% 
+  left_join(fit$results[, 1:5], by = c("lambda", "alpha", "nrounds", "eta")) %>% 
+  arrange(desc(ROC)) -> tune
+
+tune
+
+assign(paste0("tune", ".xgb2_baseline"), 
+       tune)
+```
+
+### Feature Selection: RFE (Recursive Feature Elimination)
+
+```{r}
+imp.xgb_baseline <- varImp(xgb1_baseline)$importance %>% arrange(desc(Overall))
+imp.xgb_baseline
+```
+
+```{r}
+start.time <- Sys.time()
+
+# data input
+input <- d1
+imp <- imp.xgb_baseline
+rank <- rownames(imp)[1:10]
+
+# cv recursion
+rfe <- NULL
+
+for (m in 2:length(rank)){
+  
+  # repeated LGOCV cross validation
+  pct <- 0.85
+  rep <- 100
+  
+  control <- trainControl(
+    method = "LGOCV",
+    p = pct, 
+    number = rep,
+    savePredictions = "all", 
+    classProbs = TRUE, 
+    summaryFunction = twoClassSummary)
+  
+  # grid <- expand.grid(
+  #   .sigma = 10^(-2:3), 
+  #   .C = 10^(-2:2))
+  
+  # model training
+  set.seed(123)
+  fit <- train(
+    LVEF_m06 ~ .,
+    data = input %>% select(LVEF_m06, which(predictors %in% rank[1:m])),
+    method = "xgbTree",
+    metric = "ROC",
+    #tuneGrid = grid,
+    trControl = control, 
+    verbosity = 0)
+  
+  fit$resampledCM %>%
+    group_by(eta, max_depth, gamma, colsample_bytree, min_child_weight, subsample, nrounds) %>% 
+    summarise(Accuracy = mean((cell1+cell4) / (cell1+cell2+cell3+cell4)),
+              Precision = mean(cell1 / (cell1+cell3)),
+              Recall = mean(cell1 / (cell1+cell2)),
+              Specificity = mean(cell4 / (cell3+cell4)), 
+              .groups = "drop") %>% 
+    ungroup() %>% 
+    as.data.frame() %>% 
+    mutate(F1 = 2 / (1/Recall+1/Precision)) %>% 
+    left_join(fit$results[, 1:8], by = c("eta", "max_depth", "gamma", "colsample_bytree", "min_child_weight", "subsample", "nrounds")) %>% 
+    .[1, ] %>% 
+    rbind(rfe, .) -> rfe
+  
+  print(m)
+}
+
+end.time <- Sys.time()
+print(end.time - start.time)
+
+rfe <- rfe %>% 
+  cbind(Variables = 2:length(rank), .) %>% 
+  arrange(desc(ROC))
+rownames(rfe) <- NULL
+
+assign(paste0("rfe", ".xgb1"), 
+       rfe)
+```
+
+```{r}
+rfe.xgb1
+```
+
+### Final Model
+
+```{r}
+# optimal selection after elimination
+start.time <- Sys.time()
+
+# data input
+input <- d1
+imp <- imp.xgb_baseline
+rfe <- rfe.xgb1
+
+rank <- rownames(imp)
+m <- 3 #rfe[which.max(rfe$ROC), "Variables"]
+
+# repeated LGOCV cross validation
+pct <- 0.85
+rep <- 100
+
+control <- trainControl(
+  method = "LGOCV",
+  p = pct, 
+  number = rep,
+  savePredictions = "all", 
+  classProbs = TRUE, 
+  summaryFunction = twoClassSummary)
+
+# grid <- expand.grid(
+#   .sigma = 10^(-2:3), 
+#   .C = 10^(-2:2))
+
+# model training
+set.seed(123)
+fit <- train(
+  LVEF_m06 ~ .,
+  data = input %>% select(LVEF_m06, which(predictors %in% rank[1:m])),
+  method = "xgbTree",
+  metric = "ROC",
+  #tuneGrid = grid, 
+  trControl = control)
+
+end.time <- Sys.time()
+print(end.time - start.time)
+
+assign(paste0("xgb1", "_final"), 
+       fit)
+```
+
+```{r}
+fit <- get(paste0("xgb1", "_final"))
+
+fit$resampledCM %>%
+  group_by(eta, max_depth, gamma, colsample_bytree, min_child_weight, subsample, nrounds) %>% 
+  summarise(Accuracy = mean((cell1+cell4) / (cell1+cell2+cell3+cell4)),
+            Precision = mean(cell1 / (cell1+cell3)),
+            Recall = mean(cell1 / (cell1+cell2)),
+            Specificity = mean(cell4 / (cell3+cell4)), 
+            .groups = "drop") %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  mutate(F1 = 2 / (1/Recall+1/Precision)) %>% 
+  left_join(fit$results[, 1:8], by = c("eta", "max_depth", "gamma", "colsample_bytree", "min_child_weight", "subsample", "nrounds")) %>% 
+  arrange(desc(ROC)) -> tune
+
+tune
+
+assign(paste0("tune", ".xgb1_final"), 
+       tune)
+```
+
+```{r}
+imp.xgb1_final <- varImp(xgb1_final)$importance %>% arrange(desc(Overall))
+imp.xgb1_final
+```
+
+
+
+
+
+
+
+
+### Top 8
+
+```{r}
+# optimal selection after elimination
+start.time <- Sys.time()
+
+# data input
+input <- d1
+imp <- imp.xgb_baseline
+rfe <- rfe.xgb1
+
+rank <- rownames(imp)
+m <- 8 #rfe[which.max(rfe$ROC), "Variables"]
+
+# repeated LGOCV cross validation
+pct <- 0.85
+rep <- 100
+
+control <- trainControl(
+  method = "LGOCV",
+  p = pct, 
+  number = rep,
+  savePredictions = "all", 
+  classProbs = TRUE, 
+  summaryFunction = twoClassSummary)
+
+# grid <- expand.grid(
+#   .sigma = 10^(-2:3), 
+#   .C = 10^(-2:2))
+
+# model training
+set.seed(123)
+fit <- train(
+  LVEF_m06 ~ .,
+  data = input %>% select(LVEF_m06, which(predictors %in% rank[1:m])),
+  method = "xgbTree",
+  metric = "ROC",
+  #tuneGrid = grid, 
+  trControl = control)
+
+end.time <- Sys.time()
+print(end.time - start.time)
+
+assign(paste0("xgb1", "8"), 
+       fit)
+```
+
+```{r}
+fit <- get(paste0("xgb1", "8"))
+
+fit$resampledCM %>%
+  group_by(eta, max_depth, gamma, colsample_bytree, min_child_weight, subsample, nrounds) %>% 
+  summarise(Accuracy = mean((cell1+cell4) / (cell1+cell2+cell3+cell4)),
+            Precision = mean(cell1 / (cell1+cell3)),
+            Recall = mean(cell1 / (cell1+cell2)),
+            Specificity = mean(cell4 / (cell3+cell4)), 
+            .groups = "drop") %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  mutate(F1 = 2 / (1/Recall+1/Precision)) %>% 
+  left_join(fit$results[, 1:8], by = c("eta", "max_depth", "gamma", "colsample_bytree", "min_child_weight", "subsample", "nrounds")) %>% 
+  arrange(desc(ROC)) -> tune
+
+tune
+
+assign(paste0("tune", ".xgb18"), 
+       tune)
+```
+
+```{r}
+imp.xgb18 <- varImp(xgb18)$importance %>% arrange(desc(Overall))
+imp.xgb18
+```
+
+
+```{r}
+setwd(dirname(getwd()))
+getwd()
+save(imp.xgb_baseline, file = "Feature Importance/imp.xgb_baseline.RData")
+save(xgb1_final, file = "ROC/xgb1_final.RData")
+```
+
+```{r}
+table(predict(xgb1_final, newdata = data_asym))
+```
+
+

@@ -1,0 +1,187 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r}
+# getwd()
+# save.image(file = "LASSO.RData")
+```
+
+```{r}
+# rm(list = ls())
+# load("LASSO.RData")
+```
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = TRUE)
+```
+
+```{r}
+library(pacman)
+p_load(readxl, tidyverse, RSBID, glmnet, 
+       caret, pROC, plotROC)
+select <- dplyr::select
+```
+
+```{r, warning = T}
+setwd(dirname(dirname(rstudioapi::getActiveDocumentContext()$path)))
+# getwd()
+load("Processed Data/data_sym.RData")
+load("Processed Data/data_asym.RData")
+```
+
+# Data Preparation
+
+```{r}
+# relabel response classes
+d1 <- data_sym %>% 
+  select(-Patient_ID) %>% 
+  mutate(LVEF_m06 = factor(LVEF_m06, levels = c(">50", "<50"), labels = c("normal", "low")))
+
+# record the original order of features
+predictors <- colnames(d1)
+```
+
+```{r}
+# transform categorical variables into dummy variables (for LASSO)
+d2 <- d1 %>% 
+  mutate(Gender = ifelse(Gender == "F", 0, 1), 
+         Hypertension = ifelse(Hypertension == "no", 0, 1), 
+         AF = ifelse(AF == "no", 0, 1))
+```
+
+## LASSO Regression
+
+### Baseline
+
+```{r}
+i <- 1
+iteration <- 100
+iteration_index <- c()
+while (length(iteration_index) < iteration) {
+  
+  set.seed(i)
+  samp <- sample(1:nrow(d2), 6)
+  train <- d2[-samp, ]
+  test <- d2[samp, ]
+  
+  if((table(train$LVEF_m06)[2] != 0) & (table(test$LVEF_m06)[2] != 0)){
+    iteration_index <- c(iteration_index, i)
+    }
+  
+  i <- i + 1
+}
+```
+
+```{r}
+start.time <- Sys.time()
+
+input <- d2
+
+coef <- NULL
+metric <- NULL
+pred.lasso <- NULL
+imp.lasso <- colnames(input)[-1]
+
+for (i in iteration_index){
+  
+  # cv
+  set.seed(i)
+  samp <- sample(1:nrow(input), 6)
+  train <- input[-samp, ]
+  test <- input[samp, ]
+  # find optimal lambda
+  cv.fit <- cv.glmnet(x = as.matrix(train[, -1]), y = train[, 1], family = "binomial", alpha = 1, type.measure = "class", nfolds = 5)
+  # prediction
+  pred.class <- predict(cv.fit, newx = as.matrix(test[, -1]), s = "lambda.min", type = "class") %>%
+    factor(levels = c("normal", "low"))
+  pred.response <- predict(cv.fit, newx = as.matrix(test[, -1]), s = "lambda.min", type = "response") %>%
+    c()
+  pred.lasso <- cbind(pred = pred.class, 
+                      obs = test[, 1], 
+                      normal = 1 - pred.response, 
+                      low = pred.response) %>% 
+    rbind(pred.lasso)
+  # confusion matrix
+  cm <- confusionMatrix(data = pred.class, reference = test[, 1])$table
+  accuracy <- (cm[1]+cm[4]) / (cm[1]+cm[2]+cm[3]+cm[4])
+  sensitivity <- cm[1] / (cm[1]+cm[2])
+  specificity <- cm[4] / (cm[3]+cm[4])
+  precision <- cm[1] / (cm[1]+cm[3])
+  f1 <- 2 / (1/sensitivity + 1/precision)
+  # roc
+  roc <- roc(test[, 1], pred.response, quiet = T)
+  # summarise metrics
+  metric <- rbind(metric, c(accuracy, sensitivity, specificity, precision, f1, roc$auc))
+  # coefficient
+  coef.glmnet(cv.fit, s = "lambda.min") %>%
+    as.matrix() %>%
+    cbind(coef, .) -> coef
+  
+  imp.lasso <- cbind(imp.lasso, varImp(cv.fit$glmnet.fit, lambda = cv.fit$lambda.min, scale = F))
+}
+
+metric <- metric %>% as.data.frame() %>% setNames(c("accuracy", "sensitivity", "specificity", "precision", "f1", "AUC"))
+coef <- coef %>% as.data.frame() %>% setNames(paste0("cv", 1:iteration))
+
+pred.lasso <- pred.lasso %>% 
+  as.data.frame() %>% 
+  mutate(pred = factor(pred, levels = c(1, 2), labels = c("normal", "low")), 
+         obs = factor(obs, levels = c(1, 2), labels = c("normal", "low")))
+
+imp.lasso <- imp.lasso %>% setNames(c("Predictor", paste0("iteration", 1:iteration)))
+row.names(imp.lasso) <- NULL
+
+end.time <- Sys.time()
+print(end.time - start.time)
+```
+
+```{r}
+# mean value of 6 metrics
+colMeans(metric)
+```
+
+```{r}
+# save(imp.lasso, file = "imp.lasso.RData")
+```
+
+```{r}
+rowMeans(imp.lasso[, -1]) %>% 
+  data.frame(Overall = .) %>% 
+  cbind(Predictor = imp.lasso[, 1], .) %>% 
+  arrange(desc(Overall))
+```
+
+```{r}
+# percentage of occurrence of nonzero coefficients
+(coef != 0) %>% rowMeans() %>% 
+  as.data.frame() %>% 
+  setNames("Percentage") %>% 
+  arrange(desc(Percentage)) -> coef.lasso
+
+coef.lasso
+```
+
+```{r}
+setwd(dirname(getwd()))
+getwd()
+save(coef.lasso, file = "Feature Importance/coef.lasso.RData")
+save(pred.lasso, file = "ROC/pred.lasso.RData")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

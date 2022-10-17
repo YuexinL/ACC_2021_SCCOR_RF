@@ -1,0 +1,367 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r}
+# getwd()
+# save.image(file = "RF.RData")
+```
+
+```{r}
+# rm(list = ls())
+# load("RF.RData")
+```
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = TRUE)
+```
+
+```{r}
+library(pacman)
+p_load(readxl, tidyverse, RSBID, 
+       caret, pROC, plotROC)
+select <- dplyr::select
+```
+
+```{r, warning = T}
+setwd(dirname(dirname(rstudioapi::getActiveDocumentContext()$path)))
+# getwd()
+load("Processed Data/data_sym.RData")
+load("Processed Data/data_asym.RData")
+```
+
+# Data Preparation
+
+```{r}
+# relabel response classes
+d1 <- data_sym %>% 
+  select(-Patient_ID) %>% 
+  mutate(LVEF_m06 = factor(LVEF_m06, levels = c(">50", "<50"), labels = c("normal", "low")))
+
+# record the original order of features
+predictors <- colnames(d1)
+```
+
+```{r}
+# transform categorical variables into dummy variables (for LASSO)
+d2 <- d1 %>% 
+  mutate(Gender = ifelse(Gender == "F", 0, 1), 
+         Hypertension = ifelse(Hypertension == "no", 0, 1), 
+         AF = ifelse(AF == "no", 0, 1))
+```
+
+## Random Forest
+
+### Baseline
+
+```{r}
+start.time <- Sys.time()
+
+# data input
+input <- d1
+
+# repeated LGOCV cross validation
+pct <- 0.85
+rep <- 100
+
+control <- trainControl(
+  method = "LGOCV",
+  p = pct, 
+  number = rep,
+  savePredictions = "all", 
+  classProbs = TRUE, 
+  summaryFunction = twoClassSummary)
+
+grid <- expand.grid(
+  .mtry = 2:ncol(input[, -1]))
+
+# model training
+set.seed(123)
+fit <- train(
+  LVEF_m06 ~ .,
+  data = input,
+  method = "rf",
+  metric = "ROC",
+  tuneGrid = grid,
+  trControl = control)
+
+end.time <- Sys.time()
+print(end.time - start.time)
+
+assign(paste0("rf", "_baseline"),
+       fit)
+```
+
+```{r}
+fit <- get(paste0("rf", "_baseline"))
+
+fit$resampledCM %>%
+  group_by(mtry) %>% 
+  summarise(Accuracy = mean((cell1+cell4) / (cell1+cell2+cell3+cell4)),
+            Precision = mean(cell1 / (cell1+cell3)),
+            Recall = mean(cell1 / (cell1+cell2)),
+            Specificity = mean(cell4 / (cell3+cell4)), 
+            .groups = "drop") %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  mutate(F1 = 2 / (1/Recall+1/Precision)) %>% 
+  left_join(fit$results[, 1:2], by = c("mtry")) %>% 
+  arrange(desc(ROC)) -> tune
+
+tune
+
+assign(paste0("tune", ".rf_baseline"), 
+       tune)
+```
+
+### Feature Selection: RFE (Recursive Feature Elimination)
+
+```{r}
+imp.rf_baseline <- varImp(rf_baseline)$importance %>% arrange(desc(Overall))
+imp.rf_baseline
+```
+
+```{r}
+start.time <- Sys.time()
+
+# data input
+input <- d1
+imp <- imp.rf_baseline
+rank <- rownames(imp)[1:10]
+
+# cv recursion
+rfe <- NULL
+
+for (m in 2:length(rank)){
+  
+  # repeated LGOCV cross validation
+  pct <- 0.85
+  rep <- 100
+  
+  control <- trainControl(
+    method = "LGOCV",
+    p = pct, 
+    number = rep,
+    savePredictions = "all", 
+    classProbs = TRUE, 
+    summaryFunction = twoClassSummary)
+  
+  grid <- expand.grid(
+    .mtry = 2:m)
+  
+  # model training
+  set.seed(123)
+  fit <- train(
+    LVEF_m06 ~ .,
+    data = input %>% select(LVEF_m06, which(predictors %in% rank[1:m])),
+    method = "rf",
+    metric = "ROC",
+    tuneGrid = grid,
+    trControl = control)
+  
+  fit$resampledCM %>%
+    group_by(mtry) %>% 
+    summarise(Accuracy = mean((cell1+cell4) / (cell1+cell2+cell3+cell4)),
+              Precision = mean(cell1 / (cell1+cell3)),
+              Recall = mean(cell1 / (cell1+cell2)),
+              Specificity = mean(cell4 / (cell3+cell4)), 
+              .groups = "drop") %>% 
+    ungroup() %>% 
+    as.data.frame() %>% 
+    mutate(F1 = 2 / (1/Recall+1/Precision)) %>% 
+    left_join(fit$results[, 1:2], by = c("mtry")) %>% 
+    .[1, ] %>% 
+    rbind(rfe, .) -> rfe
+  
+}
+
+end.time <- Sys.time()
+print(end.time - start.time)
+
+rfe <- rfe %>% 
+  cbind(Variables = 2:length(rank), .) %>% 
+  arrange(desc(ROC))
+rownames(rfe) <- NULL
+
+assign(paste0("rfe", ".rf"), 
+       rfe)
+```
+
+```{r}
+rfe.rf
+```
+
+### Final Model
+
+```{r}
+# optimal selection after elimination
+start.time <- Sys.time()
+
+# data input
+input <- d1
+imp <- imp.rf_baseline
+rfe <- rfe.rf
+
+rank <- rownames(imp) %>% 
+  gsub("GenderM", "Gender", .) %>% 
+  gsub("AFyes", "AF", .) %>% 
+  gsub("Hypertensionyes", "Hypertension", .)
+m <- rfe[which.max(rfe$ROC), "Variables"]
+
+# repeated LGOCV cross validation
+pct <- 0.85
+rep <- 100
+
+control <- trainControl(
+  method = "LGOCV",
+  p = pct, 
+  number = rep,
+  savePredictions = "all", 
+  classProbs = TRUE, 
+  summaryFunction = twoClassSummary)
+
+grid <- expand.grid(
+  .mtry = 2:m)
+
+# model training
+set.seed(123)
+fit <- train(
+  LVEF_m06 ~ .,
+  data = input %>% select(LVEF_m06, which(predictors %in% rank[1:m])),
+  method = "rf",
+  metric = "ROC",
+  tuneGrid = grid, 
+  trControl = control)
+
+end.time <- Sys.time()
+print(end.time - start.time)
+
+assign(paste0("rf", "_final"), 
+       fit)
+```
+
+```{r}
+fit <- get(paste0("rf", "_final"))
+
+fit$resampledCM %>%
+  group_by(mtry) %>% 
+  summarise(Accuracy = mean((cell1+cell4) / (cell1+cell2+cell3+cell4)),
+            Precision = mean(cell1 / (cell1+cell3)),
+            Recall = mean(cell1 / (cell1+cell2)),
+            Specificity = mean(cell4 / (cell3+cell4)), 
+            .groups = "drop") %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  mutate(F1 = 2 / (1/Recall+1/Precision)) %>% 
+  left_join(fit$results[, 1:2], by = c("mtry")) %>% 
+  arrange(desc(ROC)) -> tune
+
+tune
+
+assign(paste0("tune", ".rf_final"), 
+       tune)
+```
+
+```{r}
+imp.rf_final <- varImp(rf_final)$importance %>% arrange(desc(Overall))
+imp.rf_final
+```
+
+
+
+# Top 8
+
+```{r}
+# optimal selection after elimination
+start.time <- Sys.time()
+
+# data input
+input <- d1
+imp <- imp.rf_baseline
+rfe <- rfe.rf
+
+rank <- rownames(imp) %>% 
+  gsub("GenderM", "Gender", .) %>% 
+  gsub("AFyes", "AF", .) %>% 
+  gsub("Hypertensionyes", "Hypertension", .)
+m <- 5
+
+# repeated LGOCV cross validation
+pct <- 0.85
+rep <- 100
+
+control <- trainControl(
+  method = "LGOCV",
+  p = pct, 
+  number = rep,
+  savePredictions = "all", 
+  classProbs = TRUE, 
+  summaryFunction = twoClassSummary)
+
+grid <- expand.grid(
+  .mtry = 2:m)
+
+# model training
+set.seed(123)
+fit <- train(
+  LVEF_m06 ~ .,
+  data = input %>% select(LVEF_m06, which(predictors %in% rank[1:m])),
+  method = "rf",
+  metric = "ROC",
+  tuneGrid = grid, 
+  trControl = control)
+
+end.time <- Sys.time()
+print(end.time - start.time)
+
+assign(paste0("rf", "4"), 
+       fit)
+```
+
+```{r}
+fit <- get(paste0("rf", "4"))
+
+fit$resampledCM %>%
+  group_by(mtry) %>% 
+  summarise(Accuracy = mean((cell1+cell4) / (cell1+cell2+cell3+cell4)),
+            Precision = mean(cell1 / (cell1+cell3)),
+            Recall = mean(cell1 / (cell1+cell2)),
+            Specificity = mean(cell4 / (cell3+cell4)), 
+            .groups = "drop") %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  mutate(F1 = 2 / (1/Recall+1/Precision)) %>% 
+  left_join(fit$results[, 1:2], by = c("mtry")) %>% 
+  arrange(desc(ROC)) -> tune
+
+tune
+
+assign(paste0("tune", ".rf4"), 
+       tune)
+```
+
+```{r}
+imp.rf4 <- varImp(rf4)$importance %>% arrange(desc(Overall))
+imp.rf4
+```
+
+
+
+```{r}
+setwd(dirname(getwd()))
+getwd()
+# save(imp.rf_baseline, file = "Feature Importance/imp.rf_baseline.RData")
+save(rf4, file = "ROC/rf4.RData")
+```
+
+```{r}
+table(predict(rf4, newdata = data_asym))
+```
+
+
+
+
+
