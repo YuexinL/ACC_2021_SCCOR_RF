@@ -1,0 +1,33 @@
+Model,Predictor,Overall,,Model,Predictor,Overall,,Model,Predictor,Overall
+rf 1,Base LVEF,1,,rf 1.1,Base LVEF,1,,rf 1.3,Base LVEF,1
+,Sphericity Index,0.491086774,,,Sphericity Index,0.37272828,,,Sphericity Index,0.3670151
+,Systolic Circ Strain Rate,0.160374897,,,Systolic Circ Strain Rate,0.08304556,,,LVESD,0
+,LVES Max Strain,0.159177148,,,LVESD,0,,,,
+,LVESD,0.116223276,,,,,,svmPoly 2.2,Base LVEF,1
+,XOCV,0.026659907,,,,,,,XOCM,0.686746988
+,XOCM,0.01446103,,,,,,,XOCV,0.56626506
+,Height,0,,,,,,,Systolic Circ Strain Rate,0.469879518
+svmRadial 2,Base LVEF,1,,rf 1.2,Base LVEF,1,,,Sphericity Index,0.180722892
+,XOCM,0.686746988,,,Sphericity Index,0.31081944,,,BSA,0.036144578
+,XOCV,0.56626506,,,LVESD,0.08649736,,,Regurgitant Volume,0.012048193
+,Systolic Circ Strain Rate,0.469879518,,,Systolic Circ Strain Rate,0.05465471,,,Peak LV Twist Degree,0
+,Sphericity Index,0.180722892,,,LVES Max Strain,0,,,,
+,BSA,0.036144578,,,,,,xgbTree 4.1,Systolic Circ Strain Rate,1
+,Regurgitant Volume,0.012048193,,,,,,,Sphericity Index,0
+,Peak LV Twist Degree,0,,,,,,,,
+lasso 3,Base LVEF,1,,svm 2.1,Base LVEF,1,,xgbTree 4.2,Base LVEF,1
+,Sphericity Index,0.37037037,,,Systolic Circ Strain Rate,0.6,,,Sphericity Index,0.4305669
+,Gender,0.314814815,,,Sphericity Index,0.3818182,,,Systolic Circ Strain Rate,0
+,LVESD,0.166666667,,,LVESD,0,,,,
+,Systolic Circ Strain Rate,0.148148148,,,,,,,,
+,AF,0.111111111,,,,,,,,
+,ICTP,0.074074074,,,,,,,,
+,Regurgitant Volume,0,,,,,,,,
+xgbLinear 4,Base LVEF,1,,,,,,,,
+,Sphericity Index,0.461406997,,,,,,,,
+,LVES Longitudinal Strain,0.320665594,,,,,,,,
+,Peak LV Torsion Degree,0.317809109,,,,,,,,
+,Systolic Circ Strain Rate,0.239309447,,,,,,,,
+,XOCM,0.206119258,,,,,,,,
+,Regurgitant Volume,0.185346528,,,,,,,,
+,LVES Circumferential Strain,0,,,,,,,,

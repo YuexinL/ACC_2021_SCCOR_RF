@@ -1,0 +1,160 @@
+---
+title: "Untitled"
+output: html_document
+date: '2022-10-04'
+---
+
+```{r}
+library(pacman)
+p_load(tidyverse, RSBID)
+select <- dplyr::select
+```
+
+```{r, warning = T}
+rm(list = ls())
+load("imp.rf_baseline.RData")
+load("imp.svm_baseline.RData")
+load("coef.lasso.RData")
+load("imp.xgb_baseline.RData")
+```
+
+```{r}
+p <- 8
+
+imp1 <- imp.rf_baseline[1:p, ] %>% 
+  data.frame(Overall = .) %>% 
+  cbind(Model = "RF", 
+        Predictor = c("Base LVEF", 
+                      "Sphericity Index", 
+                      "LVESD", 
+                      "Systolic Circ Strain Rate", 
+                      "LVES Max Strain", 
+                      "XOCM", 
+                      "XOCV", 
+                      "Height"), .) %>% 
+  mutate(Overall = (Overall-min(Overall))/(max(Overall)-min(Overall)))
+row.names(imp1) <- NULL
+
+
+imp2 <- imp.svm_baseline[1:p, ] %>%
+  select(-low) %>%
+  rename(Overall = normal) %>%
+  cbind(Model = "SVM",
+        Predictor = c("Base LVEF",
+                      "XOCM",
+                      "XOCV",
+                      "Systolic Circ Strain Rate",
+                      "Sphericity Index",
+                      "BSA",
+                      "Regurgitant Volume",
+                      "Peak LV Twist Degree"), .) %>%
+  mutate(Overall = (Overall-min(Overall))/(max(Overall)-min(Overall)))
+row.names(imp2) <- NULL
+
+imp3 <- coef.lasso[2:(p+1), ] %>%
+  data.frame(Overall = .) %>%
+  cbind(Model = "LASSO",
+        Predictor = c("Base LVEF",
+                      "Sphericity Index",
+                      "Gender",
+                      "LVESD",
+                      "Systolic Circ Strain Rate",
+                      "AF",
+                      "ICTP",
+                      "Regurgitant Volume"), .) %>%
+  mutate(Overall = (Overall-min(Overall))/(max(Overall)-min(Overall)))
+row.names(imp3) <- NULL
+
+imp4 <- imp.xgb_baseline[1:p, ] %>%
+  data.frame(Overall = .) %>%
+  cbind(Model = "XGboost",
+        Predictor = c("Systolic Circ Strain Rate",
+                      "Sphericity Index",
+                      "Base LVEF",
+                      "Height",
+                      "Regurgitant Volume",
+                      "XOCM",
+                      "LVES Circumferential Strain",
+                      "LVES Longitudinal Strain"), .) %>%
+  mutate(Overall = (Overall-min(Overall))/(max(Overall)-min(Overall)))
+row.names(imp4) <- NULL
+```
+
+```{r}
+imp_all <- rbind(imp1, imp2, imp3, imp4) %>% 
+  mutate(Model = factor(Model, levels = c("RF", "SVM", "LASSO", "XGboost"), 
+                        labels = c("Random Forest", "Support Vector Machine", "LASSO Regression", "XGboost")))
+
+imp_col <- data.frame(Predictor = c("Base LVEF", "Systolic Circ Strain Rate", "Sphericity Index", "LVESD", "LAEF", "XOCM"), 
+                      color = c("#482677FF", "#39568CFF", "#287D8EFF", "#29AF7FFF", "#73D055FF", "#FDE725FF"))
+#("#a13670", "#ec4176", "#543884", "#9a77cf", "#b8d1ff", "#ffa45e")
+imp_all <- left_join(imp_all, imp_col, by = "Predictor") %>% 
+  mutate(color = ifelse(is.na(color), "grey60", color))
+```
+
+```{r}
+reorder_within <- function(x, by, within, fun = mean, sep = "___", ...) {
+  new_x <- paste(x, within, sep = sep)
+  stats::reorder(new_x, by, FUN = fun)
+}
+
+scale_x_reordered <- function(..., sep = "___") {
+  reg <- paste0(sep, ".+$")
+  ggplot2::scale_x_discrete(labels = function(x) gsub(reg, "", x), ...)
+}
+```
+
+```{r, fig.width = 13, fig.height = 6}
+imp_all %>% 
+  mutate(Predictor = ifelse(Predictor == "LAEF", "LA Emptying Fraction", 
+                            ifelse(Predictor == "LV Mass (ED) / LVEDV * Sphericity Index", "LV Mass/Vol x SI", 
+                                   ifelse(Predictor == "CICP", "PICP", Predictor)))) %>% 
+  
+  ggplot(aes(x = reorder_within(Predictor, Overall, Model), y = Overall)) +
+  geom_col(color = "black", fill = imp_all$color, alpha = 0.6, width = 0.7) +
+  facet_wrap(Model ~. , scales = "free", ncol = 2) +
+  coord_flip() +
+  theme_bw() +
+  theme(axis.text = element_text(size = 18, face = "bold", color = "black"), 
+        strip.text = element_text(size = 18, face = "bold", color = "black")) +
+  scale_x_reordered() +
+  labs(x = NULL, y = NULL)
+
+ggsave("Feature Importance.pdf")
+```
+
+```{r}
+# write.csv(imp_all[, -4], "Feature Importance.csv", row.names = F)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
