@@ -1,0 +1,357 @@
+---
+title: "Untitled"
+output: html_document
+date: '2022-10-04'
+---
+
+```{r}
+# devtools::install_github("ModelOriented/shapper")
+# reticulate::py_install(c("numpy", "pandas"))
+# reticulate::conda_install(c("numpy", "pandas"))
+# 
+# library("shapper")
+# install_shap()
+
+save.image(file = "Shapley.RData")
+```
+
+```{r}
+library(pacman)
+p_load(tidyverse, #RSBID, 
+       randomForest, e1071, 
+       DALEX, shapper)
+select <- dplyr::select
+```
+
+```{r, warning = T}
+setwd(dirname(dirname(rstudioapi::getActiveDocumentContext()$path)))
+# getwd()
+load("Processed Data/data_sym.RData")
+load("Processed Data/data_asym.RData")
+```
+
+# Data Preparation
+
+```{r}
+# relabel response classes
+d1 <- data_sym %>% 
+  select(-Patient_ID) %>% 
+  mutate(LVEF_m06 = factor(LVEF_m06, levels = c(">50", "<50"), labels = c("normal", "low")))
+
+# record the original order of features
+predictors <- colnames(d1)
+```
+
+# Shapley Value
+
+## RF
+
+```{r}
+opt_set <- c("LVEF_bas", "Sphericity_Index", "LVESD_mm", "Systolic_Circ_Strain_Rate_1_ms")
+
+# # train and test split
+# input <- d1_ros100 %>% select(LVEF_m06, all_of(opt_set)) #%>% .[-26, ]
+# i <- 0
+# set.seed(i)
+# samp <- sample(1:nrow(input), 0.85*nrow(input))
+# train <- input[samp, ]
+# valid <- input[-samp, ]
+# test <- data_asym %>% select(all_of(opt_set)) %>% .[-15, ]
+
+train <- d1 %>% select(LVEF_m06, all_of(opt_set))
+test <- data_asym %>% select(all_of(opt_set)) #%>% .[-15, ]
+
+# final model
+fit_rf <- randomForest(LVEF_m06 ~., data = train, mtry = 4)
+# explainer
+exp_rf <- DALEX::explain(model = fit_rf, data = train[, -1])
+```
+
+```{r}
+exp <- exp_rf
+
+# symptomatic
+shap_rf.train <- NULL
+for (i in 1:nrow(train)){
+  # shap value
+  ive <- shapper::shap(exp, new_observation = train[i, -1])
+  ive %>% select("_vname_", "_attribution_") %>% 
+    setNames(c("feature", "value")) %>% 
+    as.data.frame() %>% 
+    rbind(shap_rf.train, .) -> shap_rf.train
+}
+
+shap_rf.train <- shap_rf.train %>% arrange(feature)
+rownames(shap_rf.train) <- NULL
+
+# asymptomatic
+shap_rf.test <- NULL
+for (i in 1:nrow(test)){
+  # shap value
+  ive <- shapper::shap(exp, new_observation = test[i, ])
+  ive %>% select("_vname_", "_attribution_") %>% 
+    setNames(c("feature", "value")) %>% 
+    as.data.frame() %>% 
+    rbind(shap_rf.test, .) -> shap_rf.test
+}
+
+shap_rf.test <- shap_rf.test %>% arrange(feature)
+rownames(shap_rf.test) <- NULL
+```
+
+```{r}
+# feature value scale
+train[, -1] %>% 
+  gather(feature, scale) %>% 
+  arrange(feature) -> feat_rf.train
+
+test %>% 
+  gather(feature, scale) %>%
+  arrange(feature) -> feat_rf.test
+
+# merge
+shap_sym <- cbind(patient = "Symptomatic Patients", shap_rf.train, scale = feat_rf.train$scale)
+shap_asym <- cbind(patient = "Asymptomatic Patients", shap_rf.test, scale = feat_rf.test$scale)
+  # group_by(feature) %>%
+  # mutate(scale = (scale-min(scale))/(max(scale)-min(scale))) -> shap_rf
+```
+
+# Shapley vs. Feature Values
+
+```{r}
+shap_all <- rbind(shap_sym, shap_asym) %>% 
+  mutate(direction = ifelse(value >= 0, "Increase", "Decrease"), 
+         feature = factor(feature, levels = opt_set, 
+                          labels = c("Base LVEF", "Sphericity Index", "LVESD", 
+                                     "Systolic Circ Strain Rate")), 
+         patient = factor(patient, levels = c("Symptomatic Patients", "Asymptomatic Patients"), labels = c("Pre-Surgery", "Asymptomatic")))
+
+scales <- shap_all %>% 
+  group_by(feature) %>%
+  summarize(lower = min(scale),
+            upper = max(scale))
+
+lower <- scales$lower
+upper <- scales$upper
+range <- upper - lower
+
+# install.packages("remotes")
+# remotes::install_github("zeehio/facetscales")
+library(facetscales)
+
+
+scales_x <- list(
+  `Base LVEF` = scale_x_continuous(limits = c(lower[1]-range[1]*0.08, upper[1]+range[1]*0.04), breaks = c(30, 45, 60, 75)), 
+  `Sphericity Index` = scale_x_continuous(limits = c(lower[2], upper[2])),
+  `LVESD` = scale_x_continuous(limits = c(lower[3]-range[3]*0.03, upper[3]+range[3]*0)), 
+  `Systolic Circ Strain Rate` = scale_x_continuous(limits = c(lower[4], upper[4]), breaks = c(-0.001, -0.0005))
+)
+```
+
+```{r, fig.width = 12, fig.height = 6}
+options("scipen" = 100, "digits" = 4)
+
+cbind(feature = c("Base LVEF", "Sphericity Index", "LVESD", "Systolic Circ Strain Rate"), 
+      value = c(58.5, 1.3, 48, -0.00063)) %>% 
+  as.data.frame() %>% 
+  mutate(feature = factor(feature), 
+         value = as.numeric(value)) -> cutoff
+
+shap_all %>%
+  ggplot(aes(x = scale, y = value, col = direction)) +
+  geom_point(size = 2, alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", size = 1) +
+  geom_vline(data = cutoff, aes(xintercept = value), size = 1, color = "red", linetype = "dashed") +
+  facet_grid_sc(cols = vars(feature), rows = vars(patient), scales = list(x = scales_x)) +
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        strip.text = element_text(face = "bold", size = 10), 
+        axis.title = element_text(face = "bold", size = 20), 
+        axis.title.x = element_text(vjust = 0), 
+        axis.title.y = element_text(vjust = 1.5), 
+        axis.text = element_text(face = "bold", size = 18, color = "black"), 
+        panel.grid.minor = element_blank(), 
+        legend.title = element_text(face = "bold", size = 19), 
+        legend.text = element_text(face = "bold", size = 18)) +
+  scale_y_continuous(expand = c(0.03, 0.03)) +
+  scale_colour_manual(values = c("#E63E6D", "#1597E5")) +
+  labs(x = "Feature Value", y = "Shapley Value", 
+       col = "Likelihood of Post-Surgery LVEF < 50%")
+
+ggsave("Shapley vs. Feature Values (RF4).pdf")
+```
+
+
+
+
+
+```{r}
+nearests_all <- shap_all %>% 
+  group_by(patient, feature) %>% 
+  arrange(desc(value), .by_group = TRUE) %>% 
+  .[c(10, 11, 65, 66, 123, 124, 165, 166, 214, 215, 263, 264, 
+      313, 314, 375, 376, 437, 438, 458, 459, 514, 515, 558, 559), ] %>% 
+  mutate(scale = round(scale, 5))
+
+nearests_sym <- nearests_all %>% filter(patient == "Pre-Surgery Patients") %>% .[, -c(1, 5)]
+nearests_asym <- nearests_all %>% filter(patient == "Asymptomatic Patients") %>% .[, -c(1, 5)]
+
+nearests_sym
+nearests_asym
+```
+
+```{r, fig.width = 10, fig.height = 5}
+# opt_set <- c("LVEF_bas", "Sphericity_Index", "LVESD_mm", "Systolic_Circ_Strain_Rate_1_ms")
+
+i <- 13
+set.seed(i)
+rbind(shap_sym) %>% #filter(feature != "XOCM") %>% 
+  # scale feature values
+  group_by(feature) %>%
+  mutate(scale = (scale-min(scale))/(max(scale)-min(scale))) %>% 
+  # order labels
+  mutate(feature = factor(feature, levels = rev(opt_set), labels = rev(c("Base LVEF", "Sphericity Index", "LVESD", "Systolic Circ Strain Rate"))), 
+         patient = factor(patient, levels = c("Symptomatic Patients", "Asymptomatic Patients"))) %>% 
+  # plot
+  ggplot(aes(x = feature, y = value, col = scale)) +
+  geom_jitter(width = 0.15, size = 2, alpha = 0.7) +
+  geom_hline(yintercept = 0, alpha = 0.3) +
+  coord_flip() +
+  theme_bw() +
+  scale_color_gradient(low = "#FFCC29", high = "#185ADB", name = "Feature Value", 
+                       breaks = c(0, 1), labels = c("low", "high"), 
+                       guide = guide_colourbar(title.position = "top", barwidth = 20, barheight = 0.5)) +
+  scale_y_continuous(limits = c(-0.2, 0.66), breaks = c(-0.15, 0, 0.15, 0.3, 0.45, 0.6)) +
+  theme(title = element_text(face = "bold", size = 22), 
+        legend.title.align = 0.5, 
+        axis.title.x = element_text(vjust = -1), 
+        axis.title = element_text(face = "bold", size = 20), 
+        axis.text.x = element_text(face = "bold", size = 20, color = "black"), 
+        axis.text.y = element_text(face = "bold", size = 20, color = "black"), 
+        legend.title = element_text(face = "bold", size = 19), 
+        legend.text = element_text(face = "bold", size = 18), 
+        legend.position = "bottom") +
+  labs(title = "A. Pre-Surgery Patients", 
+       x = NULL, y = "SHAP Value (Impact on Model Output)") -> plot_sym
+
+plot_sym
+
+ggsave("Shapley RF (Pre-Surgery).pdf")
+```
+
+```{r, fig.width = 9.5, fig.height = 5.5}
+# add feature values with shapley values nearest to 0
+nearests <- nearests_sym
+
+plot_sym + 
+  annotate("text", x = 0.65, y = -0.05, label = nearests[1, 3]) +
+  annotate("text", x = 0.65, y = 0.05, label = nearests[2, 3]) +
+  annotate("text", x = 1.65, y = -0.05, label = nearests[3, 3]) +
+  annotate("text", x = 1.65, y = 0.05, label = nearests[4, 3]) +
+  annotate("text", x = 2.65, y = -0.05, label = nearests[5, 3]) +
+  annotate("text", x = 2.65, y = 0.05, label = nearests[6, 3]) +
+  annotate("text", x = 3.65, y = -0.05, label = nearests[7, 3]) +
+  annotate("text", x = 3.65, y = 0.05, label = nearests[8, 3]) +
+  annotate("text", x = 4.65, y = -0.05, label = nearests[9, 3]) +
+  annotate("text", x = 4.65, y = 0.05, label = nearests[10, 3]) +
+  annotate("text", x = 5.65, y = -0.05, label = nearests[11, 3]) +
+  annotate("text", x = 5.65, y = 0.05, label = nearests[12, 3]) -> plot_sym
+
+plot_sym
+
+# ggsave("Shapley RF (Pre-Surgery Labeled).pdf")
+```
+
+```{r, fig.width = 10, fig.height = 5}
+# opt_set <- c("LVEF_bas", "Systolic_Circ_Strain_Rate_1_ms", "LVESD_mm", "XOCM", "Sphericity_Index", "LAEF")
+
+i <- 13
+set.seed(i)
+rbind(shap_asym) %>% #filter(feature != "XOCM") %>% 
+  # scale feature values
+  group_by(feature) %>%
+  mutate(scale = (scale-min(scale))/(max(scale)-min(scale))) %>% 
+  # order labels
+  mutate(feature = factor(feature, levels = rev(opt_set), labels = rev(c("Base LVEF", "Sphericity Index", "LVESD", "Systolic Circ Strain Rate"))), 
+         patient = factor(patient, levels = c("Symptomatic Patients", "Asymptomatic Patients"))) %>% 
+  # plot
+  ggplot(aes(x = feature, y = value, col = scale)) +
+  geom_jitter(width = 0.15, size = 2, alpha = 0.7) +
+  geom_hline(yintercept = 0, alpha = 0.3) +
+  coord_flip() +
+  theme_bw() +
+  scale_color_gradient(low = "#FFCC29", high = "#185ADB", name = "Feature Value", 
+                       breaks = c(0, 1), labels = c("low", "high"), 
+                       guide = guide_colourbar(title.position = "top", barwidth = 20, barheight = 0.5)) +
+  scale_y_continuous(limits = c(-0.2, 0.66), breaks = c(-0.15, 0, 0.15, 0.3, 0.45, 0.6)) +
+  theme(title = element_text(face = "bold", size = 22), 
+        legend.title.align = 0.5, 
+        axis.title.x = element_text(vjust = -1), 
+        axis.title = element_text(face = "bold", size = 20), 
+        axis.text.x = element_text(face = "bold", size = 20, color = "black"), 
+        axis.text.y = element_text(face = "bold", size = 20, color = "black"), 
+        legend.title = element_text(face = "bold", size = 19), 
+        legend.text = element_text(face = "bold", size = 18), 
+        legend.position = "bottom") +
+  labs(title = "B. Asymptomatic Patients", 
+       x = NULL, y = "SHAP Value (Impact on Model Output)") -> plot_asym
+
+plot_asym
+
+ggsave("Shapley RF (Asymptomatic).pdf")
+```
+
+```{r, fig.width = 9.5, fig.height = 5.5}
+# add feature values with shapley values nearest to 0
+nearests <- nearests_asym
+
+plot_asym + 
+  annotate("text", x = 0.65, y = -0.05, label = nearests[1, 3]) +
+  annotate("text", x = 0.65, y = 0.05, label = nearests[2, 3]) +
+  annotate("text", x = 1.65, y = -0.05, label = nearests[3, 3]) +
+  annotate("text", x = 1.65, y = 0.05, label = nearests[4, 3]) +
+  annotate("text", x = 2.65, y = -0.05, label = nearests[5, 3]) +
+  annotate("text", x = 2.65, y = 0.05, label = nearests[6, 3]) +
+  annotate("text", x = 3.65, y = -0.05, label = nearests[7, 3]) +
+  annotate("text", x = 3.65, y = 0.05, label = nearests[8, 3]) +
+  annotate("text", x = 4.65, y = -0.05, label = nearests[9, 3]) +
+  annotate("text", x = 4.65, y = 0.05, label = nearests[10, 3]) +
+  annotate("text", x = 5.65, y = -0.05, label = nearests[11, 3]) +
+  annotate("text", x = 5.65, y = 0.05, label = nearests[12, 3]) -> plot_asym
+
+plot_asym
+
+# ggsave("Shapley RF (Asymptomatic Labeled).pdf")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
